@@ -425,8 +425,8 @@ def train_model_multivariate(
                 val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
                 for batch_idx, (batch_data, batch_target, batch_mask) in enumerate(val_loader):
+                    
                     batch_data, batch_target, batch_mask = batch_data.to(device), batch_target.to(device), batch_mask.to(device)
-
                     masked_data = batch_data * batch_mask
                     local_windows, local_masks = extract_local_window(masked_data, batch_mask, window_size, step_size)
                     local_windows_orig, local_masks_orig = extract_local_window(batch_data, batch_mask, window_size, step_size)
@@ -434,7 +434,7 @@ def train_model_multivariate(
 
                     restored_output = restore_output_to_original_shape(output, batch_data.shape[0], time_steps, altitude_levels, window_size, step_size)
 
-                    plot_and_save_2d_comparison(restored_output, masked_data, batch_data, epoch, output_dir, time_steps, altitude_levels, batch_idx, variables,'test')
+                    plot_and_save_2d_comparison(restored_output, masked_data, batch_data, epoch, output_dir, time_steps, altitude_levels, index, variables,'test')
 
                     combined_mask = local_masks * local_masks_orig
                     val_loss = dynamic_weighted_masked_loss(output, local_windows_orig, combined_mask, base_weight)
