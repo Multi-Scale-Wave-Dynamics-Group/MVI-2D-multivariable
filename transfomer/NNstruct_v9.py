@@ -6,21 +6,23 @@ import torch
 import torch.nn as nn 
 import numpy as np
 import os
+from metpy.units import units
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
 import matplotlib.pyplot as plt
 import sys
-sys.path.append(os.path.expanduser('/Users/huj7/Desktop/ERAU/MVI-2D/functions'))
+import datetime
+sys.path.append(os.path.expanduser('/Users/huj7/Desktop/ERAU/MVI-2D-multivariable/functions'))
 from data_processing import process_files, load_daily_data
-
+sys.path.append(os.path.expanduser('/Users/huj7/Desktop/ERAU/MVI-2D-multivariable/functions'))
+from P_var import calculate_buoyancy_frequency_sqrd
 ### --- Multivariable Model --- ###
 
 class MultivariableLocalTransformerWithChannelMixer(nn.Module):
     def __init__(self, input_dim, d_model, nhead, num_layers, dim_feedforward, window_size, dropout=0.2):
         super(MultivariableLocalTransformerWithChannelMixer, self).__init__()
-        
         # CNN block to capture small features from multivariable inputs
         self.cnn = nn.Sequential(
             nn.Conv2d(input_dim, d_model // 2, kernel_size=3, padding=1),  # First Conv Layer
@@ -56,6 +58,7 @@ class MultivariableLocalTransformerWithChannelMixer(nn.Module):
         self.window_size = window_size
 
     def forward(self, src):
+        
         # src shape: [batch_size, window_size_t, window_size_a, input_dim]
         batch_size, window_size_t, window_size_a, input_dim = src.shape
 
@@ -68,13 +71,12 @@ class MultivariableLocalTransformerWithChannelMixer(nn.Module):
         src = self.channel_mixer(src)  # Apply MLP: [batch_size, window_size_t, window_size_a, d_model]
 
         # Prepare rotary embeddings for time and altitude dimensions
-        rotary_emb_time = self.rotary_time(torch.arange(window_size_t, device=src.device))
-        rotary_emb_altitude = self.rotary_altitude(torch.arange(window_size_a, device=src.device))
+        rotary_emb_time = self.rotary_time(torch.arange(window_size_t, device=src.device)) # [window_size_t,nhead]
+        rotary_emb_altitude = self.rotary_altitude(torch.arange(window_size_a, device=src.device)) #[window_size_a,nhead]
 
         # Apply rotary embedding to time and altitude dimensions
-        src_rotary_time = apply_rotary_emb(rotary_emb_time, src.transpose(1, 2)).transpose(1, 2)
-        src_rotary = apply_rotary_emb(rotary_emb_altitude, src_rotary_time)
-
+        src_rotary_time = apply_rotary_emb(rotary_emb_time, src.transpose(1, 2)).transpose(1, 2) #[batch_size, window_size_t, window_size_a, d_model]
+        src_rotary = apply_rotary_emb(rotary_emb_altitude, src_rotary_time) #[batch_size, window_size_t * window_size_a, d_model]
         # Flatten for transformer: [batch_size, window_size_t * window_size_a, d_model]
         src_rotary = src_rotary.view(batch_size, window_size_t * window_size_a, -1)
 
@@ -82,14 +84,16 @@ class MultivariableLocalTransformerWithChannelMixer(nn.Module):
         transformer_out = self.transformer(src_rotary, src_rotary)
 
         # Reshape the output back to the original window shape
-        transformer_out = transformer_out.reshape(batch_size, window_size_t, window_size_a, -1)
+        transformer_out = transformer_out.reshape(batch_size, window_size_t, window_size_a, -1) # [batch_size, window_size_t, window_size_a, d_model]
 
         # Final output: prediction for all variables (sodium density, wind, temperature, etc.)
-        output = self.fc_out(transformer_out)
+        output = self.fc_out(transformer_out) #[batch_size, window_size_t, window_size_a, input_dim]
 
         return output
 
 ### --- Data Loading and Preprocessing --- ###
+from datetime import datetime
+
 def load_multivariate_data(data_dir, files, start_UT, end_UT, variables):
     """
     Load multivariable data, including sodium density, wind, temperature, etc.
@@ -99,19 +103,47 @@ def load_multivariate_data(data_dir, files, start_UT, end_UT, variables):
         start_UT, end_UT: Start and end time for extracting data.
         variables: List of variable names to load (e.g., ["Na Density", "Wind", "Temperature"]).
     Returns:
-        Combined tensor of multivariable data and a fitted scaler for each variable.
+        Combined tensor of multivariable data, time array (as datetime objects), altitude array, and a fitted scaler for each variable.
     """
     all_data = []
+    all_times = []   # To store the time data
+    all_altitudes = []  # To store altitude data [km]
+    
     for filename in files:
+        # Load the daily data for the specific file
         daily_data = load_daily_data(data_dir, [filename], start_UT, end_UT)
+
+        # Extract the time data (assumed to be stored under the key 'YYYYMMDD_hhmm')
+        time_data = daily_data['YYYYMMDD_hhmm']  # Shape (480,)
+
+        # Convert the time strings to datetime objects
+        datetime_list = [datetime.strptime(t, '%Y%m%d_%H%M') for t in time_data]
+        
+        # Extract the altitude data (assumed to be stored under the key 'Altitudes [km]')
+        altitude_data = daily_data['Altitudes [km]']  # Shape (71,)
+        
+        # Create meshgrid for time and altitude
+        #mesh_time, mesh_altitude = np.meshgrid(datetime_list, altitude_data, indexing='ij')
+        
+        # Expand dimensions to align with the multivariable data's shape [time_steps, altitude_levels, 1]
+        #mesh_time = np.expand_dims(mesh_time, axis=-1)     # Shape: (480, 71, 1)
+        #mesh_altitude = np.expand_dims(mesh_altitude, axis=-1)  # Shape: (480, 71, 1)
+        
+        # Append meshed time and altitude for this file
+        all_times.append(datetime_list)
+        all_altitudes.append(altitude_data)
+        # Extract and stack the multivariable data (e.g., sodium density, wind, temperature)
         combined = np.stack([np.transpose(np.stack(daily_data[var])) for var in variables], axis=-1)
         all_data.append(combined)
 
     # Stack all loaded files along the batch dimension
     all_data = np.stack(all_data)
+    all_times = np.stack(all_times)  # Stack time data (as datetime objects)
+    all_altitudes = np.stack(all_altitudes)  # Stack altitude data
     
     # Initialize a scaler for each variable
     scalers = {var: StandardScaler() for var in variables}
+    
     # Normalize each variable independently
     for var_idx, var in enumerate(variables):
         # Reshape for scaling the variable independently (preserve batch and spatial dimensions)
@@ -119,8 +151,10 @@ def load_multivariate_data(data_dir, files, start_UT, end_UT, variables):
         scaled_var_data = scalers[var].fit_transform(var_data).reshape(all_data.shape[:-1])  # Reshape back
         # Update the scaled data in the combined tensor
         all_data[..., var_idx] = scaled_var_data
-    # Return the processed data and the scalers for each variable
-    return torch.tensor(all_data, dtype=torch.float32), scalers
+
+    # Convert to tensors for multivariable data and altitude; time remains as datetime objects
+    return torch.tensor(all_data, dtype=torch.float32), all_times, all_altitudes, scalers
+
 
 ### --- Loss Functions --- ###
 def dynamic_weighted_masked_loss(output, target, mask, base_weight):
@@ -168,6 +202,40 @@ def physics_loss(output, wind, time_steps, altitude_levels):
     
     # Compute the physics loss as the mean squared error of the residual
     physics_loss_value = torch.mean(physics_residual ** 2)
+    
+    return physics_loss_value
+
+def physics_loss_lnT(temperature, wind, time_steps, buoyancy_freq_sqrd, g):
+    """
+    Physics-based loss enforcing the equation d(lnT)/dt = - N^2 * w / g.
+    Arguments:
+        temperature: Predicted temperature data [batch_size, time_steps, altitude_levels].
+        wind: Vertical wind data [batch_size, time_steps, altitude_levels].
+        time_steps: Time intervals corresponding to the data.
+        buoyancy_freq_sqrd: Pre-calculated buoyancy frequency squared [batch_size, time_steps, altitude_levels].
+        g: Gravitational acceleration constant.
+    Returns:
+        Physics loss as the mean squared error of the residual.
+    """
+    # Calculate d(lnT)/dt (time derivative of the log of temperature)
+    temp = temperature.detach().cpu().numpy()
+    w = wind.detach().cpu().numpy()
+    lnT = np.log(temp)
+# Step 3: Calculate the gradient with respect to time_steps (axis 1 in this case)
+# Assuming time_steps are represented in the second dimension (80 in this case)
+    dlnT_dt = np.gradient(lnT, axis=1)  # Gradient with respect to time axis
+
+# Step 4: If needed, map to a vector (flatten the array)
+# Flatten the gradient to a 1D vector
+    dlnT_dt_vector = dlnT_dt.flatten()
+    w_pint = w.flatten() * units.meter / units.second
+    g_pint = 9.81 * units.meter / units.second**2
+    N_sqrd_w_g_vector = (buoyancy_freq_sqrd * w_pint ) / g_pint
+    # Physics residual: d(lnT)/dt + N^2 * w / g
+    physics_residual = dlnT_dt_vector + N_sqrd_w_g_vector.magnitude
+    # Compute the physics loss as the mean squared error of the residual
+
+    physics_loss_value = np.mean(physics_residual ** 2)
     
     return physics_loss_value
 
@@ -349,7 +417,7 @@ def train_model_multivariate(
 
         for index, filename in enumerate(train_files):
             # Load training data and scalers
-            train_data, scalers = load_multivariate_data(data_dir, [filename], start_UT, end_UT, variables)
+            train_data, datetime_list, altitudes, scalers = load_multivariate_data(data_dir, [filename], start_UT, end_UT, variables)
 
             # Mask creation for training
             mask_train = torch.isnan(train_data).float().to(device)
@@ -363,7 +431,6 @@ def train_model_multivariate(
 
             for batch_idx, (batch_data, batch_target, batch_mask) in enumerate(train_loader):
                 batch_data, batch_target, batch_mask = batch_data.to(device), batch_target.to(device), batch_mask.to(device)
-
                 optimizer.zero_grad()
 
                 # Forward pass
@@ -386,11 +453,21 @@ def train_model_multivariate(
                 #total_batch_loss = mse_loss + lambda_smooth * smooth_loss
 
                 #
-                # Physics loss computation
+                # Physics loss computation --- vertical wind
                 wind_data = batch_data[..., 1]  # Assuming wind is the second variable in the input
-                physics_loss_value = physics_loss(restored_output[...,0], wind_data, time_steps, altitude_levels)
+                physics_loss_value_wind = physics_loss(restored_output[...,0], wind_data, time_steps, altitude_levels)
+                import pdb
+                pdb.set_trace()
+                # Physics loss computation --- Temperature
+                temperature_data = restored_output[..., 0]  # Assuming temperature is the first variable
+                lat = -31.17
+                lon = -70.81
+                g = 9.81
+                buoyancy_freq_sqrd = calculate_buoyancy_frequency_sqrd(np.squeeze(datetime_list),lat,lon, np.squeeze(altitudes))  # Example buoyancy frequency computation
+                physics_loss_value_Temp = physics_loss_lnT(temperature_data, wind_data, time_steps, buoyancy_freq_sqrd, g)
+
                 # Total loss
-                total_batch_loss = mse_loss + lambda_smooth * smooth_loss + 1 * physics_loss_value
+                total_batch_loss = mse_loss + lambda_smooth * smooth_loss + 1 * physics_loss_value_wind + physics_loss_value_Temp
 
                 total_batch_loss.backward()
                 optimizer.step()
@@ -415,7 +492,7 @@ def train_model_multivariate(
         total_val_loss = 0
         with torch.no_grad():
             for index, filename in enumerate(val_files):
-                val_data, scalers = load_multivariate_data(data_dir, [filename], start_UT, end_UT, variables)
+                val_data,_,_,_ = load_multivariate_data(data_dir, [filename], start_UT, end_UT, variables)
                 mask_val = torch.isnan(val_data).float().to(device)
                 mask_val = 1.0 - mask_val
                 val_data = torch.nan_to_num(val_data, nan=0.0).to(device)
@@ -425,7 +502,7 @@ def train_model_multivariate(
                 val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
                 for batch_idx, (batch_data, batch_target, batch_mask) in enumerate(val_loader):
-                    
+
                     batch_data, batch_target, batch_mask = batch_data.to(device), batch_target.to(device), batch_mask.to(device)
                     masked_data = batch_data * batch_mask
                     local_windows, local_masks = extract_local_window(masked_data, batch_mask, window_size, step_size)
