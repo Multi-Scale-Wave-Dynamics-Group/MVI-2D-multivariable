@@ -15,12 +15,19 @@ This repository contains code and data fro a multi-variable imputation model des
 
 
 MVI-2D-multivariable/
+
 ├── data/                    # Data storage
+
 ├── model/                   # Atmospheric data saving directory from model "msise00"
+
 ├── functions/               # Utility functions
+
 ├── transfomer/              # Training script
+
 ├── debug/                   # Testing script
+
 ├── Results/                 # Trained model weights and figures
+
 └── README.md
 
 
