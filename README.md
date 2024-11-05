@@ -13,7 +13,7 @@ This repository contains code and data fro a multi-variable imputation model des
 
 **Loss Functions**: Includes 1) reconstruction loss, 2) imputation loss, 3) second derivative loss, and 4) physcis-based constraints
 
-
+### Code package structure
 MVI-2D-multivariable/
 
 ├── data/                    # Data storage
