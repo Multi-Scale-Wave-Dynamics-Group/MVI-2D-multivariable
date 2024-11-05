@@ -17,7 +17,7 @@ import datetime
 sys.path.append(os.path.expanduser('/Users/huj7/Desktop/ERAU/MVI-2D-multivariable/functions'))
 from data_processing import process_files, load_daily_data
 sys.path.append(os.path.expanduser('/Users/huj7/Desktop/ERAU/MVI-2D-multivariable/functions'))
-from P_var import calculate_buoyancy_frequency_sqrd
+from P_var_update import calculate_potential_temperature, calculate_density_ratio
 ### --- Multivariable Model --- ###
 
 class MultivariableLocalTransformerWithChannelMixer(nn.Module):
@@ -177,7 +177,7 @@ def smoothness_loss(predictions):
     return loss_time
 
 ### --- Physics Loss --- ###
-def physics_loss(output, wind, time_steps, altitude_levels):
+def physics_loss(density, wind, time, lat, lon, alt ,scaler_density, scaler_wind):
     """
     Compute the physics loss based on the equation: dρ/dt + w * dρ/dz = 0
     Arguments:
@@ -188,53 +188,54 @@ def physics_loss(output, wind, time_steps, altitude_levels):
     Returns:
         Physics loss based on finite differences
     """
+    den_unnormalized = scaler_density.inverse_transform(density.detach().cpu().numpy().reshape(-1,1)).reshape(density.shape)
+    wind_unnormalized = scaler_wind.inverse_transform(wind.detach().cpu().numpy().reshape(-1, 1)).reshape(wind.shape)
+    density_ratio = calculate_density_ratio(time,lat,lon,alt,den_unnormalized)
+    density_ratio = density_ratio.reshape(density.shape)
     # Compute finite differences along the time axis (dρ/dt)
-    d_rho_dt = output[:, 1:, :] - output[:, :-1, :]  # Shape: [batch_size, time_steps-1, altitude_levels, num_variables]
-    
+    d_rho_dt = density_ratio[:, 1:, :] - density_ratio[:, :-1, :]  # Shape: [batch_size, time_steps-1, altitude_levels, num_variables]
     # Compute finite differences along the altitude axis (dρ/dz)
-    d_rho_dz = output[:, :, 1:] - output[:, :, :-1]  # Shape: [batch_size, time_steps, altitude_levels-1, num_variables]
-    
+    d_rho_dz = density_ratio[:, :, 1:] - density_ratio[:, :, :-1]  # Shape: [batch_size, time_steps, altitude_levels-1, num_variables]
     # Crop wind data to match the finite difference dimensions
-    wind_cropped = wind[:, 1:, :-1]  # Shape: [batch_size, time_steps-1, altitude_levels-1, num_variables]
-    
+    wind_cropped = wind_unnormalized[:, 1:, :-1]  # Shape: [batch_size, time_steps-1, altitude_levels-1, num_variables]
     # Physics constraint: dρ/dt + w * dρ/dz = 0
     physics_residual = d_rho_dt[:, :, :-1] + wind_cropped * d_rho_dz[:, :-1, :]
-    
     # Compute the physics loss as the mean squared error of the residual
-    physics_loss_value = torch.mean(physics_residual ** 2)
+    physics_loss_value = np.mean(physics_residual ** 2)
     
     return physics_loss_value
 
-def physics_loss_lnT(temperature, wind, time_steps, buoyancy_freq_sqrd, g):
+def physics_loss_lnT(actual_temp, wind, time, lat, lon, alt, scaler_temperature, scaler_wind):
     """
-    Physics-based loss enforcing the equation d(lnT)/dt = - N^2 * w / g.
+    Physics-based loss enforcing d(lnT)/dt with unnormalized temperature and wind parameters.
     Arguments:
-        temperature: Predicted temperature data [batch_size, time_steps, altitude_levels].
-        wind: Vertical wind data [batch_size, time_steps, altitude_levels].
-        time_steps: Time intervals corresponding to the data.
-        buoyancy_freq_sqrd: Pre-calculated buoyancy frequency squared [batch_size, time_steps, altitude_levels].
-        g: Gravitational acceleration constant.
+        actual_temp: Predicted (normalized) temperature data [batch_size, time_steps, altitude_levels].
+        wind: Predicted (normalized) vertical wind data [batch_size, time_steps, altitude_levels].
+        time, lat, lon, alt: Time and location information for computing potential temperature.
+        scaler_temperature, scaler_wind: Scalers to inverse transform temperature and wind.
     Returns:
         Physics loss as the mean squared error of the residual.
     """
-    # Calculate d(lnT)/dt (time derivative of the log of temperature)
-    temp = temperature.detach().cpu().numpy()
-    w = wind.detach().cpu().numpy()
-    lnT = np.log(temp)
-# Step 3: Calculate the gradient with respect to time_steps (axis 1 in this case)
-# Assuming time_steps are represented in the second dimension (80 in this case)
-    dlnT_dt = np.gradient(lnT, axis=1)  # Gradient with respect to time axis
-
-# Step 4: If needed, map to a vector (flatten the array)
-# Flatten the gradient to a 1D vector
-    dlnT_dt_vector = dlnT_dt.flatten()
-    w_pint = w.flatten() * units.meter / units.second
-    g_pint = 9.81 * units.meter / units.second**2
-    N_sqrd_w_g_vector = (buoyancy_freq_sqrd * w_pint ) / g_pint
-    # Physics residual: d(lnT)/dt + N^2 * w / g
-    physics_residual = dlnT_dt_vector + N_sqrd_w_g_vector.magnitude
-    # Compute the physics loss as the mean squared error of the residual
-
+    # Inverse transform temperature and wind to unnormalized values
+    temp_unnormalized = scaler_temperature.inverse_transform(actual_temp.detach().cpu().numpy().reshape(-1, 1)).reshape(actual_temp.shape)
+    wind_unnormalized = scaler_wind.inverse_transform(wind.detach().cpu().numpy().reshape(-1, 1)).reshape(wind.shape)
+    
+    # Calculate potential temperature using unnormalized temperature
+    potential_temp = calculate_potential_temperature(time, lat, lon, alt, temp_unnormalized)
+    
+    # Compute the natural logarithm of the unnormalized temperature
+    lnT = np.log(temp_unnormalized)
+    dlnT_dt = np.gradient(lnT, axis=1)  # Time gradient of log temperature
+    # Reshape altitudes to match the expected shape for gradient calculation
+    alt_meters = alt * 1000  # Convert altitude from km to meters
+    alt_meters = np.broadcast_to(alt_meters, (temp_unnormalized.shape[0], len(alt_meters)))  # Shape: [batch_size, altitude_levels]
+    # Calculate vertical gradient of potential temperature (dθ/dz)
+    dtheta_dz = np.gradient(potential_temp.reshape(1,80,71), np.squeeze(alt_meters), axis=-1)  # Vertical gradient along altitude
+    # Reshape wind to pint units for correct scaling
+    wind_pint = wind_unnormalized * units.meter / units.second
+    # Physics residual: d(lnT)/dt + (w * dθ/dz) / θ
+    physics_residual = dlnT_dt.flatten() + (wind_pint.flatten() * dtheta_dz.flatten() / potential_temp).magnitude
+    # Mean squared error of the residual
     physics_loss_value = np.mean(physics_residual ** 2)
     
     return physics_loss_value
@@ -403,7 +404,8 @@ def train_model_multivariate(
     base_weight, 
     lambda_smooth
 ):
-
+    lat = -31.17  
+    lon = -70.81
     best_loss = float('inf')
     epoch_losses = []  # List to store training loss for each epoch
     val_losses = []  # List to store validation loss for each epoch
@@ -418,7 +420,10 @@ def train_model_multivariate(
         for index, filename in enumerate(train_files):
             # Load training data and scalers
             train_data, datetime_list, altitudes, scalers = load_multivariate_data(data_dir, [filename], start_UT, end_UT, variables)
-
+            # Unpack scalers for each variable
+            scaler_temperature = scalers["Temperature (K)"]
+            scaler_wind = scalers["Vertical Wind (m/s)"]
+            scaler_density = scalers["Na Density (cm^(-3))"]
             # Mask creation for training
             mask_train = torch.isnan(train_data).float().to(device)
             mask_train = 1.0 - mask_train  # NaNs to 0
@@ -454,26 +459,28 @@ def train_model_multivariate(
 
                 #
                 # Physics loss computation --- vertical wind
-                wind_data = batch_data[..., 1]  # Assuming wind is the second variable in the input
-                physics_loss_value_wind = physics_loss(restored_output[...,0], wind_data, time_steps, altitude_levels)
-                import pdb
-                pdb.set_trace()
+                physics_loss_value_wind = physics_loss(
+                    restored_output[...,0], batch_data[..., 1], np.squeeze(datetime_list), lat, lon, 
+                    np.squeeze(altitudes) ,scaler_density, scaler_wind
+                )
                 # Physics loss computation --- Temperature
-                temperature_data = restored_output[..., 0]  # Assuming temperature is the first variable
-                lat = -31.17
-                lon = -70.81
-                g = 9.81
-                buoyancy_freq_sqrd = calculate_buoyancy_frequency_sqrd(np.squeeze(datetime_list),lat,lon, np.squeeze(altitudes))  # Example buoyancy frequency computation
-                physics_loss_value_Temp = physics_loss_lnT(temperature_data, wind_data, time_steps, buoyancy_freq_sqrd, g)
-
+                temperature_data = restored_output[..., 2]  # Assuming temperature is the first variable
+                wind_data = restored_output[...,1]
+                # Calculate physics loss for temperature using unnormalized parameters
+                physics_loss_value_temp = physics_loss_lnT(
+                    temperature_data, wind_data, np.squeeze(datetime_list), lat, lon, 
+                    np.squeeze(altitudes), scaler_temperature, scaler_wind
+                )
                 # Total loss
-                total_batch_loss = mse_loss + lambda_smooth * smooth_loss + 1 * physics_loss_value_wind + physics_loss_value_Temp
+                if not np.isnan(physics_loss_value_temp):
+                    total_batch_loss = mse_loss + lambda_smooth * smooth_loss + physics_loss_value_wind + physics_loss_value_temp
+                else:
+                    total_batch_loss = mse_loss + lambda_smooth * smooth_loss + physics_loss_value_wind
 
                 total_batch_loss.backward()
                 optimizer.step()
 
                 total_train_loss += total_batch_loss.item()
-
         avg_train_loss = total_train_loss / len(train_files)
         epoch_losses.append(avg_train_loss)
         print(f'Epoch {epoch + 1}/{num_epochs}, Training Loss: {avg_train_loss}')
@@ -508,9 +515,7 @@ def train_model_multivariate(
                     local_windows, local_masks = extract_local_window(masked_data, batch_mask, window_size, step_size)
                     local_windows_orig, local_masks_orig = extract_local_window(batch_data, batch_mask, window_size, step_size)
                     output = model(local_windows)
-
                     restored_output = restore_output_to_original_shape(output, batch_data.shape[0], time_steps, altitude_levels, window_size, step_size)
-
                     plot_and_save_2d_comparison(restored_output, masked_data, batch_data, epoch, output_dir, time_steps, altitude_levels, index, variables,'test')
 
                     combined_mask = local_masks * local_masks_orig
