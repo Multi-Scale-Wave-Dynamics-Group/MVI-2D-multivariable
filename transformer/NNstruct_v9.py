@@ -19,7 +19,7 @@ function_path = os.path.join(home_path,'functions')
 sys.path.append(os.path.expanduser(function_path))
 from data_processing import process_files, load_daily_data
 from P_var_update import calculate_potential_temperature, calculate_density_ratio
-import re
+
 ### --- Multivariable Model --- ###
 
 class MultivariableLocalTransformerWithChannelMixer(nn.Module):
