@@ -2,6 +2,7 @@ import os
 import numpy as np
 from datetime import datetime, timedelta
 from scipy.interpolate import interp1d
+import re
 col = "UT (hour) for each column"
 row = "Altitudes (km) for each row"
 mat_list = [
@@ -96,17 +97,15 @@ def process_files(files, start_UT, end_UT, data_dir):
 
     return stacked_data
 
-def load_daily_data(data_dir, file_list,start_UT, end_UT):
-  daily_data = {}
-  for filename in file_list:
+def load_daily_data(filename,start_UT,end_UT):
     mat_flag = False
     col_flag = False
     row_flag = False
     col_np = []
     row_np = []
     mat_np = {}
-
-    with open(os.path.join(data_dir, filename), 'r') as f:
+    
+    with open(filename, 'r') as f:
         for line in f:
             line = line.strip()
 
@@ -119,7 +118,6 @@ def load_daily_data(data_dir, file_list,start_UT, end_UT):
             if line in mat_list:
                 mat_flag = line
                 continue
-
             if line == '':
                 continue
 
@@ -134,7 +132,6 @@ def load_daily_data(data_dir, file_list,start_UT, end_UT):
                     mat_np[mat_flag] = np.vstack([mat_np[mat_flag], np.fromstring(line, dtype=float, sep=' ')])
                 else:
                     mat_np[mat_flag] = np.fromstring(line, dtype=float, sep=' ')
-
     full_hours = np.arange(start_UT, end_UT, 0.1)  
     full_mat_np = {}
     for key in mat_np.keys():
@@ -146,12 +143,10 @@ def load_daily_data(data_dir, file_list,start_UT, end_UT):
         indices = np.searchsorted(full_hours, valid_col_np)
         valid_mat_np = mat_np[key][:, valid_indices]  # Filter corresponding data
         full_mat_np[key][:, indices] = valid_mat_np
-
-    datestr = filename.split('_')[0]
+    datestr = re.match(r"^\d{8}", os.path.basename(filename)).group()
     datenum = convert_to_date_number(datestr, full_hours)  # Use full_hours for date numbers
     full_mat_np['YYYYMMDD_hhmm'] = datenum
     full_mat_np['Altitudes [km]'] = row_np
-      
     return full_mat_np
 
 def create_missing_strips_for_dict(data_dict, num_strips, strip_width):
