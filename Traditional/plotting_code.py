@@ -1,57 +1,102 @@
 import matplotlib.pyplot as plt
 import numpy as np
+from datetime import datetime, timedelta
 
-def plot_file_data(all_imputed_data_dict, all_mask_dict, all_original_data_dict, save_plots=False, output_dir="plots"):
+def plot_traditional_imputation_results(
+    all_original_data_dict, 
+    all_mask_dict, 
+    all_imputed_data_dict, 
+    time_labels, 
+    altitude_labels, 
+    time_step=20, 
+    altitude_step=20, 
+    fontsize=20, 
+    labelsize=18,
+    rotation=45
+):
     """
-    Plot three subplots for each file: imputed, masked, and original data.
+    Plot traditional imputation results for all files in the dataset.
 
     Parameters:
-        all_imputed_data_dict (dict): Dictionary of imputed data.
-        all_mask_dict (dict): Dictionary of masks used during imputation.
-        all_original_data_dict (dict): Dictionary of original data.
-        save_plots (bool): Whether to save the plots as images.
-        output_dir (str): Directory to save the plots (if save_plots is True).
+        all_original_data_dict: dict
+            Dictionary containing original data (86 x 120 x 39 for each variable).
+        all_mask_dict: dict
+            Dictionary containing masked data (86 x 120 x 39 for each variable).
+        all_imputed_data_dict: dict
+            Dictionary containing imputed data (86 x 120 x 39 for each variable).
+        time_labels: list
+            List of time labels (e.g., "Hour_1").
+        altitude_labels: list
+            List of altitude labels (e.g., "80", "81").
+        fontsize: int
+            Font size for plot titles and labels.
+        labelsize: int
+            Font size for axis labels.
+        time_step: int
+            Step size for reducing the number of time labels.
+        altitude_step: int
+            Step size for reducing the number of altitude labels.
+        rotation: int
+            Rotation angle for x-axis labels.
     """
-    for key in all_imputed_data_dict.keys():
-        imputed_datasets = all_imputed_data_dict[key]
-        original_datasets = all_original_data_dict[key]
-        masked_datasets = all_mask_dict[key]
+    variables = list(all_original_data_dict.keys())
+    rows, cols = 3, len(variables)
 
-        # Iterate through each dataset in the current variable
-        for idx, (imputed_data, original_data, mask) in enumerate(zip(imputed_datasets, original_datasets, masked_datasets)):
-            print(f"Plotting for {key} - File {idx + 1}")
-            
-            fig, axes = plt.subplots(1, 2, figsize=(8, 6), constrained_layout=True)
+    num_files = np.array(all_original_data_dict[variables[0]]).shape[0]
+    
+    # Reduced labels for cleaner visualization
+    reduced_time_labels = [label.split('_')[1][:2] for label in time_labels[::time_step]]
+    reduced_time_indices = list(range(0, len(time_labels), time_step))
+    reduced_altitude_labels = altitude_labels[::altitude_step]
+    reduced_altitude_indices = list(range(0, len(altitude_labels), altitude_step))
 
-            # Plot 1: Imputed data
-            ax = axes[0]
-            if imputed_data.ndim == 2:
-                im = ax.imshow(imputed_data-original_data, aspect='auto', cmap='viridis')
-                fig.colorbar(im, ax=ax)
-            else:
-                ax.plot(imputed_data-original_data)
-            ax.set_title("Imputed Data")
-            ax.set_ylabel("Altitude" if imputed_data.ndim == 2 else "Value")
-            ax.set_xlabel("Time")
+    variable_units = {
+        "Na Density (cm^(-3))": r"$\text{Na Density (cm}^{-3}\text{)}$",
+        "Vertical Wind (m/s)": r"$\text{Vertical Wind (m/s)}$",
+        "Temperature (K)": r"$\text{Temperature (K)}$"
+    }
 
-            # Plot 3: Original data
-            ax = axes[1]
-            if original_data.ndim == 2:
-                im = ax.imshow(mask , aspect='auto', cmap='viridis')
-                fig.colorbar(im, ax=ax)
-            else:
-                ax.plot(original_data)
-            ax.set_title("Original Data")
-            ax.set_ylabel("Altitude" if original_data.ndim == 2 else "Value")
-            ax.set_xlabel("Time")
+    for file_idx in range(num_files):
+    # Set up the figure for each file
+        fig, axs = plt.subplots(rows, cols, figsize=(5 * cols, 4 * rows), constrained_layout=True)
+        date_label = time_labels[0][:8]
+        formatted_date = datetime.strptime(date_label, "%Y%m%d").strftime("%m-%d-%Y")  # Convert to 'MM-DD-YYYY'
+        fig.suptitle(f"Imputation Results for Date: {formatted_date}", fontsize=fontsize + 4, y=1.02)
+        for row in range(rows):
+            for col in range(cols):
+                var = variables[col]
+                original_data = all_original_data_dict[var][file_idx]
+                masked_data = all_mask_dict[var][file_idx]
+                imputed_data = all_imputed_data_dict[var][file_idx]
+                imputed_diff = imputed_data - original_data
 
-            # Save the plot if requested
-            if save_plots:
-                if not os.path.exists(output_dir):
-                    os.makedirs(output_dir)
-                plot_path = os.path.join(output_dir, f"{key.replace(' ', '_')}_file_{idx + 1}.png")
-                plt.savefig(plot_path)
-                print(f"Saved plot to {plot_path}")
-            
-            # Show the plot
-            plt.show()
+            # Select the correct data for each subplot
+                if row == 0:  # Imputed - Original
+                    im = axs[row, col].imshow(imputed_diff, aspect='auto', cmap='seismic', origin='lower')
+                    axs[row, col].set_title(f"{variable_units[var]} \n(Imputed - Original)", fontsize=fontsize + 2)
+                elif row == 1:  # Masked Data
+                    im = axs[row, col].imshow(masked_data * original_data, aspect='auto', cmap='viridis', origin='lower')
+                    axs[row, col].set_title(f"{variable_units[var]} \n(Masked Data)", fontsize=fontsize + 2)
+                elif row == 2:  # Original Data
+                    im = axs[row, col].imshow(original_data, aspect='auto', cmap='viridis', origin='lower')
+                    axs[row, col].set_title(f"{variable_units[var]} \n(Original Data)", fontsize=fontsize + 2)
+            # Configure axis labels
+                if row == rows - 1:  # Only bottom row gets x-axis labels
+                    axs[row, col].set_xlabel("Altitude (km)", fontsize=fontsize)
+                    axs[row, col].set_xticks(reduced_altitude_indices)
+                    axs[row, col].set_xticklabels(reduced_altitude_labels, fontsize=labelsize, rotation=rotation)
+                else:
+                    axs[row, col].set_xticks([])
+
+                if col == 0:  # Only leftmost column gets y-axis labels
+                    axs[row, col].set_ylabel("Universal Hour", fontsize=fontsize)
+                    axs[row, col].set_yticks(reduced_time_indices)
+                    axs[row, col].set_yticklabels(reduced_time_labels, fontsize=labelsize)
+                else:
+                    axs[row, col].set_yticks([])
+
+                # Add colorbar
+                fig.colorbar(im, ax=axs[row, col], orientation='vertical', pad=0.02)
+
+    # Display the figure
+        plt.show()

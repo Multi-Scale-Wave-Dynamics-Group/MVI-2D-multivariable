@@ -1,4 +1,5 @@
 ### --- v9 --- ###
+# Updated at: Dec. 2 2024
 # Add multi-variables
 # Add channel mixer
 # testing code --- DataPrep_3rd.ipynb
@@ -21,7 +22,6 @@ from data_processing import process_files, load_daily_data
 from P_var_update import calculate_potential_temperature, calculate_density_ratio
 
 ### --- Multivariable Model --- ###
-
 class MultivariableLocalTransformerWithChannelMixer(nn.Module):
     def __init__(self, input_dim, d_model, nhead, num_layers, dim_feedforward, window_size, dropout=0.2):
         super(MultivariableLocalTransformerWithChannelMixer, self).__init__()
@@ -221,7 +221,6 @@ def physics_loss_lnT(actual_temp, wind, time, lat, lon, alt, scaler_temperature,
     # Inverse transform temperature and wind to unnormalized values
     temp_unnormalized = scaler_temperature.inverse_transform(actual_temp.detach().cpu().numpy().reshape(-1, 1)).reshape(actual_temp.shape)
     wind_unnormalized = scaler_wind.inverse_transform(wind.detach().cpu().numpy().reshape(-1, 1)).reshape(wind.shape)
-    
     # Calculate potential temperature using unnormalized temperature
     potential_temp = calculate_potential_temperature(time, lat, lon, alt, temp_unnormalized)
     
@@ -239,41 +238,47 @@ def physics_loss_lnT(actual_temp, wind, time, lat, lon, alt, scaler_temperature,
     physics_residual = dlnT_dt.flatten() + (wind_pint.flatten() * dtheta_dz.flatten() / potential_temp).magnitude
     # Mean squared error of the residual
     physics_loss_value = np.mean(physics_residual ** 2)
-    
     return physics_loss_value
-
 ### --- Mask and local window --- ###
-def mask_slices(data, mask_ratio, max_consecutive=3):
+import numpy as np
+import torch
+def mask_slices(data, mask_ratio, max_strip_width):
+    """
+    Apply random masking with random strip widths to 4D data.
 
-    batch_size, time_steps, altitude_levels, input_dim = data.shape  # Ensure the correct shape
-    # Create a time mask for each batch and time step
-    time_mask = np.random.rand(batch_size, time_steps) < mask_ratio
-    
-    # Ensure no more than `max_consecutive` time steps are masked consecutively
-    #for i in range(batch_size):
-    #    consecutive_count = 0
-    #    for t in range(time_steps):
-    #        if time_mask[i, t]:
-    #            consecutive_count += 1
-    #        else:
-    #            consecutive_count = 0
-    #        if consecutive_count > max_consecutive:
-    #            time_mask[i, t] = False  # Unmask to break the streak of consecutive masked time steps
-    #            consecutive_count = 0  # Reset the count after unmasking
-    # Ensure no more than `max_consecutive` time steps are masked consecutively
+    Parameters:
+        data (torch.Tensor): Input data of shape [batch_size, time_steps, altitude_levels, input_dim].
+        mask_ratio (float): Ratio of time steps to be masked.
+        max_strip_width (int): Maximum width of a missing strip.
 
-    # Convert the mask to a torch tensor and move it to the same device as the data
-    time_mask = torch.tensor(time_mask, dtype=torch.float32, device=data.device)
-    
-    # Expand the mask to match the altitude levels and input dimensions
-    mask = time_mask.unsqueeze(2).unsqueeze(-1).expand(batch_size, time_steps, altitude_levels, input_dim)
-    
-    # If the mask has an extra singleton dimension, remove it with squeeze()
-    mask = mask.squeeze(-1)
-    
+    Returns:
+        torch.Tensor: Masked data.
+        torch.Tensor: Mask indicating valid (1) and masked (0) entries.
+    """
+    batch_size, time_steps, altitude_levels, input_dim = data.shape
+    # Calculate the approximate total number of time steps to be masked for the entire batch
+    total_missing_time_steps = int(mask_ratio * batch_size * time_steps)
+    # Initialize the mask as all True (no missing data)
+    mask = np.ones((batch_size, time_steps, altitude_levels), dtype=bool)
+    # Track the number of time steps already masked
+    masked_steps = 0
+    while masked_steps < total_missing_time_steps:
+        # Randomly select a strip width between 1 and max_strip_width
+        current_strip_width = np.random.randint(1, max_strip_width + 1)
+        # Randomly select a batch index
+        batch_index = np.random.randint(0, batch_size)
+        # Randomly select a start index for the strip within the time dimension
+        start_index = np.random.randint(0, time_steps - current_strip_width + 1)
+        # If this strip will exceed the desired missing steps, adjust its width
+        current_strip_width = min(current_strip_width, total_missing_time_steps - masked_steps)
+        # Apply the mask for the selected strip
+        mask[batch_index, start_index:start_index + current_strip_width, :] = False
+        # Update the number of masked steps
+        masked_steps += current_strip_width
+    # Convert the mask to a PyTorch tensor and move it to the same device as the data
+    mask = torch.tensor(mask, dtype=torch.float32, device=data.device).unsqueeze(-1).expand(batch_size, time_steps, altitude_levels, input_dim)
     # Apply the mask to the data
     masked_data = data * mask
-    
     return masked_data, mask
 
 def extract_local_window(data, mask, time_window_size, step_size):
@@ -379,10 +384,9 @@ def plot_and_save_2d_comparison(output, masked_data, batch_data, epoch, output_d
         fig.colorbar(im2, ax=axs[2])
 
         # Save the figure for each variable
-        file_name = f'epoch_{epoch}_file_{index}_var_{var_idx}_{cat_str}.png'
+        file_name = f'epoch_{epoch}_var_{var_idx}_{cat_str}.png'
         plt.savefig(os.path.join(output_dir, file_name))
         plt.close()
-
 
 ### --- Training Function --- ###
 def train_model_multivariate(
@@ -400,6 +404,7 @@ def train_model_multivariate(
     output_dir, 
     window_size, 
     mask_ratio, 
+    max_strip_width,
     time_steps, 
     altitude_levels, 
     step_size, 
@@ -441,7 +446,7 @@ def train_model_multivariate(
                 optimizer.zero_grad()
 
                 # Forward pass
-                masked_data, random_mask = mask_slices(batch_data, mask_ratio=mask_ratio)
+                masked_data, random_mask = mask_slices(batch_data, mask_ratio=mask_ratio, max_strip_width=max_strip_width)
                 random_mask = random_mask.unsqueeze(-1)
                 local_windows, local_masks = extract_local_window(masked_data, random_mask, window_size, step_size)
                 local_windows_orig, local_masks_orig = extract_local_window(batch_data, batch_mask, window_size, step_size)
@@ -478,7 +483,6 @@ def train_model_multivariate(
                     total_batch_loss = mse_loss + lambda_smooth * smooth_loss + physics_loss_value_wind + physics_loss_value_temp
                 else:
                     total_batch_loss = mse_loss + lambda_smooth * smooth_loss + physics_loss_value_wind
-
                 total_batch_loss.backward()
                 optimizer.step()
 
@@ -518,6 +522,8 @@ def train_model_multivariate(
                     local_windows_orig, local_masks_orig = extract_local_window(batch_data, batch_mask, window_size, step_size)
                     output = model(local_windows)
                     restored_output = restore_output_to_original_shape(output, batch_data.shape[0], time_steps, altitude_levels, window_size, step_size)
+                    import pdb
+                    pdb.set_trace()
                     plot_and_save_2d_comparison(restored_output, masked_data, batch_data, epoch, output_dir, time_steps, altitude_levels, index, variables,'test')
 
                     combined_mask = local_masks * local_masks_orig

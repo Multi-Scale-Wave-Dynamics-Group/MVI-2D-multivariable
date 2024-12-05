@@ -3,14 +3,16 @@ from datetime import datetime, timedelta
 import os
 import re
 
-def mask_slices(data, missing_ratio=0.5, strip_width=1):
+import numpy as np
+
+def mask_slices(data, missing_ratio, strip_width):
     """
-    Artificially crop missing time strips from 2D time series data.
+    Artificially crop missing time strips from 2D time series data with random strip widths.
 
     Parameters:
         data (numpy.ndarray): The 2D time series data [time x altitude].
         missing_ratio (float): Ratio of total time steps to crop as missing strips.
-        strip_width (int): Number of consecutive time steps to crop in each strip.
+        max_strip_width (int): Maximum width of a missing strip.
 
     Returns:
         numpy.ndarray: Data with missing time strips.
@@ -18,22 +20,36 @@ def mask_slices(data, missing_ratio=0.5, strip_width=1):
     """
     n_time, n_altitude = data.shape
 
-    # Calculate the number of missing strips based on the ratio
-    n_missing_strips = max(1, int(missing_ratio * n_time / strip_width))
+    # Calculate the approximate number of total time steps to be masked
+    total_missing_time_steps = int(missing_ratio * n_time)
 
-    # Randomly choose starting indices for the missing strips
-    missing_starts = np.random.choice(n_time - strip_width, n_missing_strips, replace=False)
-    print(missing_starts)
-
-    # Create a mask to crop the time strips
+    # Initialize the mask as all True (no missing data)
     mask = np.ones_like(data, dtype=bool)
-    for start in missing_starts:
-        mask[start:start + strip_width, :] = False
+
+    # Track the number of time steps already masked
+    masked_steps = 0
+
+    while masked_steps < total_missing_time_steps:
+        # Randomly select a strip width between 1 and max_strip_width
+        current_strip_width = np.random.randint(1, strip_width + 1)
+
+        # Randomly select a start index for the strip
+        start_index = np.random.randint(0, n_time - current_strip_width + 1)
+
+        # If this strip will exceed the desired missing steps, adjust its width
+        current_strip_width = min(current_strip_width, total_missing_time_steps - masked_steps)
+
+        # Apply the mask for the selected strip
+        mask[start_index:start_index + current_strip_width, :] = False
+
+        # Update the number of masked steps
+        masked_steps += current_strip_width
 
     # Apply the mask to create missing strips (set missing data to NaN)
     cropped_data = np.where(mask, data, np.nan)
-    
+
     return cropped_data, mask
+
 
 def convert_to_date_number(date_str, ut_hours):
     """Convert date string and UT hours to formatted date numbers."""
